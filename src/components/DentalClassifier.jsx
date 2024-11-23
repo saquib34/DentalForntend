@@ -1,10 +1,21 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, Activity, AlertCircle, Loader2, Camera, RefreshCcw, WifiOff } from 'lucide-react';
+import { Upload, Activity, AlertCircle, Loader2, Camera, RefreshCcw } from 'lucide-react';
 import axios from 'axios';
 import { useDropzone } from 'react-dropzone';
 import Progress from './Progress';
 import Alert from './Alert';
+
+// API Configuration
+const API_CONFIG = {
+  baseURL: 'https://dentalbackend-8hhh.onrender.com',
+  timeout: 60000, // 60 seconds
+  headers: {
+    'Content-Type': 'application/json',
+  }
+};
+
+const axiosInstance = axios.create(API_CONFIG);
 
 const DentalClassifier = () => {
   const [selectedImage, setSelectedImage] = useState(null);
@@ -15,7 +26,50 @@ const DentalClassifier = () => {
   const [progress, setProgress] = useState(0);
   const [serverStarting, setServerStarting] = useState(false);
 
+  // Cleanup preview URL when component unmounts
+  useEffect(() => {
+    return () => {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
+    };
+  }, [previewUrl]);
+
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  const validateImage = (file) => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.src = URL.createObjectURL(file);
+
+      img.onload = () => {
+        URL.revokeObjectURL(img.src);
+
+        // Check dimensions
+        if (img.width < 100 || img.height < 100) {
+          reject('Image dimensions too small. Minimum 100x100 pixels required.');
+          return;
+        }
+        if (img.width > 4096 || img.height > 4096) {
+          reject('Image dimensions too large. Maximum 4096x4096 pixels allowed.');
+          return;
+        }
+
+        // Check file size (5MB)
+        if (file.size > 5 * 1024 * 1024) {
+          reject('Image size should be less than 5MB');
+          return;
+        }
+
+        resolve(true);
+      };
+
+      img.onerror = () => {
+        URL.revokeObjectURL(img.src);
+        reject('Invalid image file');
+      };
+    });
+  };
 
   const retryWithDelay = async (fn, retries = 5, delay = 10000) => {
     try {
@@ -31,20 +85,25 @@ const DentalClassifier = () => {
     }
   };
 
-  const onDrop = useCallback((acceptedFiles) => {
+  const onDrop = useCallback(async (acceptedFiles) => {
     const file = acceptedFiles[0];
     if (file) {
-      if (file.size > 5 * 1024 * 1024) { // 5MB limit
-        setError('Image size should be less than 5MB');
-        return;
+      try {
+        await validateImage(file);
+        if (previewUrl) {
+          URL.revokeObjectURL(previewUrl);
+        }
+        const newPreviewUrl = URL.createObjectURL(file);
+        setSelectedImage(file);
+        setPreviewUrl(newPreviewUrl);
+        setError('');
+        setResults(null);
+        setProgress(0);
+      } catch (err) {
+        setError(err);
       }
-      setSelectedImage(file);
-      setPreviewUrl(URL.createObjectURL(file));
-      setError('');
-      setResults(null);
-      setProgress(0);
     }
-  }, []);
+  }, [previewUrl]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -74,7 +133,7 @@ const DentalClassifier = () => {
 
             // Make API call with retries
             const response = await retryWithDelay(async () => {
-              return await axios.post('https://dentalbackend-8hhh.onrender.com/api/classify', {
+              return await axiosInstance.post('/api/classify', {
                 image: reader.result
               });
             });
@@ -85,10 +144,14 @@ const DentalClassifier = () => {
           } catch (err) {
             if (err?.response?.status === 503) {
               setError('Server is starting up. Please wait a moment and try again.');
+            } else if (err?.response?.status === 413) {
+              setError('Image size is too large. Please use a smaller image.');
+            } else if (err?.code === 'ECONNABORTED') {
+              setError('Request timed out. Please try again.');
             } else {
               setError('Failed to classify image. Please try again.');
+              console.error('Error:', err);
             }
-            console.error('Error:', err);
           } finally {
             setLoading(false);
             setServerStarting(false);
@@ -103,6 +166,17 @@ const DentalClassifier = () => {
       setServerStarting(false);
     }
   };
+
+  const resetClassifier = useCallback(() => {
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+    }
+    setSelectedImage(null);
+    setPreviewUrl('');
+    setResults(null);
+    setError('');
+    setProgress(0);
+  }, [previewUrl]);
 
   return (
     <div className="max-w-6xl mx-auto px-4">
@@ -235,12 +309,7 @@ const DentalClassifier = () => {
                       Analysis Results
                     </h3>
                     <button
-                      onClick={() => {
-                        setSelectedImage(null);
-                        setPreviewUrl('');
-                        setResults(null);
-                        setError('');
-                      }}
+                      onClick={resetClassifier}
                       className="text-gray-500 hover:text-gray-700"
                     >
                       <RefreshCcw className="w-5 h-5" />
