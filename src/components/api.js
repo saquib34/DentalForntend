@@ -6,8 +6,7 @@ const API_CONFIG = {
   timeout: 180000, // 3 minutes
   headers: {
     'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'Origin': typeof window !== 'undefined' ? window.location.origin : 'https://dental.saquib.in'
+    'Accept': 'application/json'
   },
   withCredentials: false
 };
@@ -23,24 +22,24 @@ const axiosInstance = axios.create(API_CONFIG);
 
 // Add request interceptor
 axiosInstance.interceptors.request.use((config) => {
-  // Ensure headers are properly set
+  // Remove manual Origin header setting as it's automatically handled by the browser
   config.headers = {
     ...config.headers,
     'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'Origin': typeof window !== 'undefined' ? window.location.origin : 'https://dental.saquib.in'
+    'Accept': 'application/json'
   };
   return config;
 }, (error) => {
   return Promise.reject(error);
 });
 
-// Enhanced response interceptor
+// Enhanced response interceptor with better error handling
 axiosInstance.interceptors.response.use(
   response => response,
   async error => {
     const originalRequest = error.config;
     
+    // Log error details for debugging
     console.error('API Error:', {
       status: error?.response?.status,
       data: error?.response?.data,
@@ -48,12 +47,30 @@ axiosInstance.interceptors.response.use(
       message: error.message
     });
     
+    // Handle timeout errors
     if (error.code === 'ECONNABORTED' && !originalRequest._retry) {
       originalRequest._retry = true;
+      // Wait 30 seconds before retrying
       return new Promise(resolve => {
         setTimeout(() => {
           resolve(axiosInstance(originalRequest));
         }, 30000);
+      });
+    }
+
+    // Handle specific error cases
+    if (error.response?.status === 503) {
+      // Server is starting up
+      return Promise.reject({
+        ...error,
+        customMessage: 'Server is starting up. Please wait a moment.'
+      });
+    }
+
+    if (error.code === 'ERR_NETWORK') {
+      return Promise.reject({
+        ...error,
+        customMessage: 'Network error. Please check your connection.'
       });
     }
 
@@ -63,14 +80,19 @@ axiosInstance.interceptors.response.use(
 
 // Enhanced retry function with exponential backoff
 const retryWithExponentialBackoff = async (fn, retries = retryConfig.maxRetries) => {
+  let lastError;
+  
   for (let i = 0; i < retries; i++) {
     try {
       return await fn();
     } catch (error) {
-      const shouldRetry = i < retries - 1 && 
-        (error?.response?.status === 503 || 
-         error.code === 'ERR_NETWORK' || 
-         error.code === 'ECONNABORTED');
+      lastError = error;
+      
+      const shouldRetry = i < retries - 1 && (
+        error?.response?.status === 503 || 
+        error.code === 'ERR_NETWORK' || 
+        error.code === 'ECONNABORTED'
+      );
 
       if (!shouldRetry) throw error;
 
@@ -83,7 +105,12 @@ const retryWithExponentialBackoff = async (fn, retries = retryConfig.maxRetries)
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
-  throw new Error('Max retries reached');
+  
+  throw {
+    ...lastError,
+    message: 'Max retries reached',
+    customMessage: 'Server is not responding after multiple attempts. Please try again later.'
+  };
 };
 
 export { axiosInstance, retryWithExponentialBackoff };
