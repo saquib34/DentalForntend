@@ -14,12 +14,23 @@ const API_CONFIG = {
     'Content-Type': 'application/json',
     'Accept': 'application/json'
   },
-  withCredentials: true
+  withCredentials: false
 };
 
 const axiosInstance = axios.create(API_CONFIG);
 
-// Add interceptor to handle CORS preflight
+// Add request interceptor to handle CORS
+axiosInstance.interceptors.request.use((config) => {
+  // Ensure headers are properly set
+  config.headers = {
+    ...config.headers,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+  };
+  return config;
+});
+
+// Add response interceptor for error handling
 axiosInstance.interceptors.response.use(
   response => response,
   error => {
@@ -135,13 +146,15 @@ const DentalClassifier = () => {
     setProgress(0);
     setServerStarting(false);
 
+    let progressInterval;
+
     try {
       const reader = new FileReader();
       await new Promise((resolve, reject) => {
         reader.onloadend = async () => {
           try {
             // Start progress animation
-            const progressInterval = setInterval(() => {
+            progressInterval = setInterval(() => {
               setProgress(prev => Math.min(prev + 2, 90));
             }, 1000);
 
@@ -156,7 +169,10 @@ const DentalClassifier = () => {
             setProgress(100);
             setResults(response.data.predictions);
           } catch (err) {
-            clearInterval(progressInterval);
+            if (progressInterval) {
+              clearInterval(progressInterval);
+            }
+            
             if (err?.response?.status === 503) {
               setError('Server is starting up. Please wait a moment and try again.');
             } else if (err?.response?.status === 413) {
@@ -174,10 +190,18 @@ const DentalClassifier = () => {
             setServerStarting(false);
           }
         };
-        reader.onerror = reject;
+        reader.onerror = (error) => {
+          if (progressInterval) {
+            clearInterval(progressInterval);
+          }
+          reject(error);
+        };
         reader.readAsDataURL(selectedImage);
       });
     } catch (err) {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+      }
       setError('Failed to process image');
       setLoading(false);
       setServerStarting(false);
