@@ -9,38 +9,83 @@ import Alert from './Alert';
 // API Configuration
 const API_CONFIG = {
   baseURL: 'https://dentalbackend-8hhh.onrender.com',
-  timeout: 60000,
+  timeout: 120000, // Increased timeout for Render's cold start
   headers: {
     'Content-Type': 'application/json',
-    'Accept': 'application/json'
+    'Accept': 'application/json',
+    'Origin': typeof window !== 'undefined' ? window.location.origin : 'https://dental.saquib.in'
   },
   withCredentials: false
 };
 
 const axiosInstance = axios.create(API_CONFIG);
 
-// Add request interceptor to handle CORS
+// Add request interceptor to handle CORS and retries
 axiosInstance.interceptors.request.use((config) => {
   // Ensure headers are properly set
   config.headers = {
     ...config.headers,
     'Content-Type': 'application/json',
-    'Accept': 'application/json'
+    'Accept': 'application/json',
+    'Origin': typeof window !== 'undefined' ? window.location.origin : 'https://dental.saquib.in'
   };
   return config;
 });
 
-// Add response interceptor for error handling
+// Enhanced response interceptor for better error handling
 axiosInstance.interceptors.response.use(
   response => response,
-  error => {
+  async error => {
+    console.error('API Error:', {
+      status: error?.response?.status,
+      data: error?.response?.data,
+      code: error.code,
+      message: error.message
+    });
+
     if (error.code === 'ERR_NETWORK') {
-      console.error('CORS or Network Error:', error);
-      return Promise.reject(new Error('Network error. Please try again later.'));
+      return Promise.reject(new Error('Unable to connect to server. Please try again.'));
     }
+    
+    if (error.response?.status === 503) {
+      return Promise.reject(new Error('Server is starting up. Please wait a moment.'));
+    }
+    
+    if (error.code === 'ECONNABORTED') {
+      return Promise.reject(new Error('Request timed out. Server might be starting up.'));
+    }
+
     return Promise.reject(error);
   }
 );
+
+// Retry configuration
+const retryConfig = {
+  maxRetries: 5,
+  initialDelay: 10000,
+  maxDelay: 30000
+};
+
+// Enhanced retry function with exponential backoff
+const retryWithExponentialBackoff = async (fn, retries = retryConfig.maxRetries) => {
+  try {
+    return await fn();
+  } catch (error) {
+    if (retries === 0) throw error;
+
+    const delay = Math.min(
+      retryConfig.initialDelay * (retryConfig.maxRetries - retries + 1),
+      retryConfig.maxDelay
+    );
+
+    if (error?.response?.status === 503 || error.code === 'ERR_NETWORK') {
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return retryWithExponentialBackoff(fn, retries - 1);
+    }
+
+    throw error;
+  }
+};
 
 const DentalClassifier = () => {
   const [selectedImage, setSelectedImage] = useState(null);
@@ -59,8 +104,6 @@ const DentalClassifier = () => {
       }
     };
   }, [previewUrl]);
-
-  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
   const validateImage = (file) => {
     return new Promise((resolve, reject) => {
@@ -94,20 +137,6 @@ const DentalClassifier = () => {
         reject('Invalid image file');
       };
     });
-  };
-
-  const retryWithDelay = async (fn, retries = 5, delay = 10000) => {
-    try {
-      return await fn();
-    } catch (error) {
-      if (retries === 0) throw error;
-      if (error?.response?.status === 503) {
-        setServerStarting(true);
-        await sleep(delay);
-        return retryWithDelay(fn, retries - 1, delay);
-      }
-      throw error;
-    }
   };
 
   const onDrop = useCallback(async (acceptedFiles) => {
@@ -158,11 +187,14 @@ const DentalClassifier = () => {
               setProgress(prev => Math.min(prev + 2, 90));
             }, 1000);
 
-            // Make API call with retries
-            const response = await retryWithDelay(async () => {
-              return await axiosInstance.post('/api/classify', {
+            // Make API call with enhanced retry logic
+            const response = await retryWithExponentialBackoff(async () => {
+              setServerStarting(true);
+              const result = await axiosInstance.post('/api/classify', {
                 image: reader.result
               });
+              setServerStarting(false);
+              return result;
             });
 
             clearInterval(progressInterval);
@@ -173,29 +205,38 @@ const DentalClassifier = () => {
               clearInterval(progressInterval);
             }
             
+            let errorMessage = 'Failed to classify image. Please try again.';
+            
             if (err?.response?.status === 503) {
-              setError('Server is starting up. Please wait a moment and try again.');
+              errorMessage = 'Server is starting up. Please wait a moment and try again.';
             } else if (err?.response?.status === 413) {
-              setError('Image size is too large. Please use a smaller image.');
+              errorMessage = 'Image size is too large. Please use a smaller image.';
             } else if (err?.code === 'ECONNABORTED') {
-              setError('Request timed out. Please try again.');
+              errorMessage = 'Request timed out. Please try again.';
             } else if (err?.code === 'ERR_NETWORK') {
-              setError('Network error. Please check your connection and try again.');
-            } else {
-              setError('Failed to classify image. Please try again.');
-              console.error('Error:', err);
+              errorMessage = 'Unable to connect to server. Please check your connection.';
+            } else if (err?.response?.status === 500) {
+              errorMessage = 'Server error. Please try again later.';
             }
+            
+            setError(errorMessage);
+            console.error('Classification error:', err);
           } finally {
             setLoading(false);
             setServerStarting(false);
+            if (!error) setProgress(0);
           }
         };
+
         reader.onerror = (error) => {
           if (progressInterval) {
             clearInterval(progressInterval);
           }
+          setError('Failed to read image file');
+          setLoading(false);
           reject(error);
         };
+
         reader.readAsDataURL(selectedImage);
       });
     } catch (err) {
@@ -205,6 +246,7 @@ const DentalClassifier = () => {
       setError('Failed to process image');
       setLoading(false);
       setServerStarting(false);
+      setProgress(0);
     }
   };
 
@@ -380,15 +422,100 @@ const DentalClassifier = () => {
                         <Progress value={result.confidence * 100} />
                       </motion.div>
                     ))}
+                    
+                    {/* Additional Information */}
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-100"
+                    >
+                      <p className="text-sm text-blue-700">
+                        Note: These results are for educational purposes only. Please consult a dental professional for accurate diagnosis.
+                      </p>
+                    </motion.div>
                   </div>
                 </motion.div>
               )}
             </AnimatePresence>
           </div>
         </div>
+
+        {/* Footer Information */}
+        <div className="px-6 py-4 bg-gray-50 border-t border-gray-100">
+          <p className="text-sm text-gray-600 text-center">
+            {loading ? 
+              "Please wait while we analyze your image..." :
+              "Upload a clear image of the dental condition for best results"
+            }
+          </p>
+        </div>
       </div>
+
+      {/* Error Boundary */}
+      <ErrorBoundary>
+        {error && error.includes('server') && (
+          <div className="mt-4">
+            <Alert variant="warning">
+              <p className="text-sm">
+                If the server is not responding, you can try:
+                <ul className="list-disc ml-4 mt-2">
+                  <li>Waiting a few moments and trying again</li>
+                  <li>Checking your internet connection</li>
+                  <li>Refreshing the page</li>
+                </ul>
+              </p>
+            </Alert>
+          </div>
+        )}
+      </ErrorBoundary>
     </div>
   );
 };
+
+// Error Boundary Component
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Error caught by boundary:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="mt-4">
+          <Alert variant="error">
+            <p>Something went wrong. Please try refreshing the page.</p>
+          </Alert>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+// Progress component type definition (if using TypeScript)
+/* 
+interface ProgressProps {
+  value: number;
+}
+*/
+
+// Alert component type definition (if using TypeScript)
+/*
+interface AlertProps {
+  variant: 'error' | 'warning' | 'success' | 'info';
+  children: React.ReactNode;
+  className?: string;
+}
+*/
 
 export default DentalClassifier;
