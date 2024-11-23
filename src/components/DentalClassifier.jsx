@@ -8,15 +8,28 @@ import Alert from './Alert';
 
 // API Configuration
 const API_CONFIG = {
-    baseURL: 'https://dentalbackend-8hhh.onrender.com',
-    timeout: 60000,
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    withCredentials: false // Important: set this to false for CORS
-  };
-  
+  baseURL: 'https://dentalbackend-8hhh.onrender.com',
+  timeout: 60000,
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+  },
+  withCredentials: true
+};
+
 const axiosInstance = axios.create(API_CONFIG);
+
+// Add interceptor to handle CORS preflight
+axiosInstance.interceptors.response.use(
+  response => response,
+  error => {
+    if (error.code === 'ERR_NETWORK') {
+      console.error('CORS or Network Error:', error);
+      return Promise.reject(new Error('Network error. Please try again later.'));
+    }
+    return Promise.reject(error);
+  }
+);
 
 const DentalClassifier = () => {
   const [selectedImage, setSelectedImage] = useState(null);
@@ -143,12 +156,15 @@ const DentalClassifier = () => {
             setProgress(100);
             setResults(response.data.predictions);
           } catch (err) {
+            clearInterval(progressInterval);
             if (err?.response?.status === 503) {
               setError('Server is starting up. Please wait a moment and try again.');
             } else if (err?.response?.status === 413) {
               setError('Image size is too large. Please use a smaller image.');
             } else if (err?.code === 'ECONNABORTED') {
               setError('Request timed out. Please try again.');
+            } else if (err?.code === 'ERR_NETWORK') {
+              setError('Network error. Please check your connection and try again.');
             } else {
               setError('Failed to classify image. Please try again.');
               console.error('Error:', err);
