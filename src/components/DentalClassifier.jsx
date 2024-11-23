@@ -8,13 +8,14 @@ import Alert from './Alert';
 
 // API Configuration
 const API_CONFIG = {
-  baseURL: 'https://dentalbackend-8hhh.onrender.com',
-  timeout: 60000, // 60 seconds
-  headers: {
-    'Content-Type': 'application/json',
-  }
-};
-
+    baseURL: 'https://dentalbackend-8hhh.onrender.com',
+    timeout: 60000,
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    withCredentials: false // Important: set this to false for CORS
+  };
+  
 const axiosInstance = axios.create(API_CONFIG);
 
 const DentalClassifier = () => {
