@@ -1,25 +1,37 @@
-import React from 'react';
-import { AlertCircle, CheckCircle, XCircle } from 'lucide-react';
+import { AlertCircle, CheckCircle, Info, AlertTriangle } from 'lucide-react';
 
-const Alert = ({ children, variant = 'info', className = '' }) => {
+const Alert = ({ variant = 'info', children, className = '' }) => {
   const variants = {
-    info: 'bg-blue-50 text-blue-800 border-blue-200',
-    success: 'bg-green-50 text-green-800 border-green-200',
-    error: 'bg-red-50 text-red-800 border-red-200',
-    warning: 'bg-yellow-50 text-yellow-800 border-yellow-200'
+    error: {
+      wrapper: 'bg-red-50 border-red-200',
+      text: 'text-red-700',
+      icon: AlertCircle
+    },
+    warning: {
+      wrapper: 'bg-yellow-50 border-yellow-200',
+      text: 'text-yellow-700',
+      icon: AlertTriangle
+    },
+    success: {
+      wrapper: 'bg-green-50 border-green-200',
+      text: 'text-green-700',
+      icon: CheckCircle
+    },
+    info: {
+      wrapper: 'bg-blue-50 border-blue-200',
+      text: 'text-blue-700',
+      icon: Info
+    }
   };
 
-  const icons = {
-    info: <AlertCircle className="w-5 h-5" />,
-    success: <CheckCircle className="w-5 h-5" />,
-    error: <XCircle className="w-5 h-5" />,
-    warning: <AlertCircle className="w-5 h-5" />
-  };
+  const { wrapper, text, icon: Icon } = variants[variant] || variants.info;
 
   return (
-    <div className={`flex items-center p-4 rounded-lg border ${variants[variant]} ${className}`}>
-      <span className="mr-2">{icons[variant]}</span>
-      {children}
+    <div className={`${wrapper} ${text} border rounded-lg p-4 ${className}`}>
+      <div className="flex">
+        <Icon className="h-5 w-5 mr-3 flex-shrink-0" />
+        <div>{children}</div>
+      </div>
     </div>
   );
 };

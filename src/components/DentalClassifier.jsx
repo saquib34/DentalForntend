@@ -1,91 +1,10 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Upload, Activity, AlertCircle, Loader2, Camera, RefreshCcw } from 'lucide-react';
-import axios from 'axios';
 import { useDropzone } from 'react-dropzone';
+import { axiosInstance, retryWithExponentialBackoff } from './api';
 import Progress from './Progress';
 import Alert from './Alert';
-
-// API Configuration
-const API_CONFIG = {
-  baseURL: 'https://dentalbackend-8hhh.onrender.com',
-  timeout: 120000, // Increased timeout for Render's cold start
-  headers: {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'Origin': typeof window !== 'undefined' ? window.location.origin : 'https://dental.saquib.in'
-  },
-  withCredentials: false
-};
-
-const axiosInstance = axios.create(API_CONFIG);
-
-// Add request interceptor to handle CORS and retries
-axiosInstance.interceptors.request.use((config) => {
-  // Ensure headers are properly set
-  config.headers = {
-    ...config.headers,
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'Origin': typeof window !== 'undefined' ? window.location.origin : 'https://dental.saquib.in'
-  };
-  return config;
-});
-
-// Enhanced response interceptor for better error handling
-axiosInstance.interceptors.response.use(
-  response => response,
-  async error => {
-    console.error('API Error:', {
-      status: error?.response?.status,
-      data: error?.response?.data,
-      code: error.code,
-      message: error.message
-    });
-
-    if (error.code === 'ERR_NETWORK') {
-      return Promise.reject(new Error('Unable to connect to server. Please try again.'));
-    }
-    
-    if (error.response?.status === 503) {
-      return Promise.reject(new Error('Server is starting up. Please wait a moment.'));
-    }
-    
-    if (error.code === 'ECONNABORTED') {
-      return Promise.reject(new Error('Request timed out. Server might be starting up.'));
-    }
-
-    return Promise.reject(error);
-  }
-);
-
-// Retry configuration
-const retryConfig = {
-  maxRetries: 5,
-  initialDelay: 10000,
-  maxDelay: 30000
-};
-
-// Enhanced retry function with exponential backoff
-const retryWithExponentialBackoff = async (fn, retries = retryConfig.maxRetries) => {
-  try {
-    return await fn();
-  } catch (error) {
-    if (retries === 0) throw error;
-
-    const delay = Math.min(
-      retryConfig.initialDelay * (retryConfig.maxRetries - retries + 1),
-      retryConfig.maxDelay
-    );
-
-    if (error?.response?.status === 503 || error.code === 'ERR_NETWORK') {
-      await new Promise(resolve => setTimeout(resolve, delay));
-      return retryWithExponentialBackoff(fn, retries - 1);
-    }
-
-    throw error;
-  }
-};
 
 const DentalClassifier = () => {
   const [selectedImage, setSelectedImage] = useState(null);
@@ -95,6 +14,7 @@ const DentalClassifier = () => {
   const [error, setError] = useState('');
   const [progress, setProgress] = useState(0);
   const [serverStarting, setServerStarting] = useState(false);
+  const [currentAttempt, setCurrentAttempt] = useState(0);
 
   // Cleanup preview URL when component unmounts
   useEffect(() => {
@@ -153,6 +73,7 @@ const DentalClassifier = () => {
         setError('');
         setResults(null);
         setProgress(0);
+        setCurrentAttempt(0);
       } catch (err) {
         setError(err);
       }
@@ -174,32 +95,40 @@ const DentalClassifier = () => {
     setError('');
     setProgress(0);
     setServerStarting(false);
+    setCurrentAttempt(1);
 
     let progressInterval;
+
+    const startProgress = () => {
+      if (progressInterval) clearInterval(progressInterval);
+      setProgress(0);
+      progressInterval = setInterval(() => {
+        setProgress(prev => {
+          const increment = currentAttempt === 1 ? 1 : 2;
+          return Math.min(prev + increment, 90);
+        });
+      }, 1000);
+    };
 
     try {
       const reader = new FileReader();
       await new Promise((resolve, reject) => {
         reader.onloadend = async () => {
           try {
-            // Start progress animation
-            progressInterval = setInterval(() => {
-              setProgress(prev => Math.min(prev + 2, 90));
-            }, 1000);
+            startProgress();
+            setServerStarting(true);
 
-            // Make API call with enhanced retry logic
             const response = await retryWithExponentialBackoff(async () => {
-              setServerStarting(true);
-              const result = await axiosInstance.post('/api/classify', {
+              setCurrentAttempt(prev => prev + 1);
+              return await axiosInstance.post('/api/classify', {
                 image: reader.result
               });
-              setServerStarting(false);
-              return result;
             });
 
-            clearInterval(progressInterval);
+            if (progressInterval) clearInterval(progressInterval);
             setProgress(100);
             setResults(response.data.predictions);
+            setServerStarting(false);
           } catch (err) {
             if (progressInterval) {
               clearInterval(progressInterval);
@@ -212,11 +141,11 @@ const DentalClassifier = () => {
             } else if (err?.response?.status === 413) {
               errorMessage = 'Image size is too large. Please use a smaller image.';
             } else if (err?.code === 'ECONNABORTED') {
-              errorMessage = 'Request timed out. Please try again.';
+              errorMessage = 'The server is taking longer than expected. Please try again.';
             } else if (err?.code === 'ERR_NETWORK') {
               errorMessage = 'Unable to connect to server. Please check your connection.';
-            } else if (err?.response?.status === 500) {
-              errorMessage = 'Server error. Please try again later.';
+            } else if (err.message === 'Max retries reached') {
+              errorMessage = 'The server is not responding. Please try again later.';
             }
             
             setError(errorMessage);
@@ -259,6 +188,7 @@ const DentalClassifier = () => {
     setResults(null);
     setError('');
     setProgress(0);
+    setCurrentAttempt(0);
   }, [previewUrl]);
 
   return (
@@ -310,7 +240,7 @@ const DentalClassifier = () => {
                     <>
                       <Loader2 className="w-5 h-5 animate-spin" />
                       <span>
-                        {serverStarting ? 'Starting server...' : 'Analyzing...'}
+                        {serverStarting ? `Starting server (Attempt ${currentAttempt}/3)...` : 'Analyzing...'}
                       </span>
                     </>
                   ) : (
@@ -324,14 +254,17 @@ const DentalClassifier = () => {
             )}
 
             {error && (
-              <Alert variant="error" className="animate-fade-in">
+              <Alert 
+                variant="error" 
+                className="animate-fade-in"
+              >
                 <div className="flex items-center gap-2">
                   <AlertCircle className="w-5 h-5" />
                   <span>{error}</span>
                 </div>
-                {error.includes('Server is starting up') && (
+                {error.includes('Server is') && (
                   <p className="text-sm mt-2 text-gray-600">
-                    This might take up to 50 seconds as we're using a free server that needs to wake up.
+                    This might take up to 2-3 minutes as we're using a free server that needs to wake up.
                   </p>
                 )}
               </Alert>
@@ -365,15 +298,20 @@ const DentalClassifier = () => {
                   <div className="text-center space-y-4">
                     <Loader2 className="w-16 h-16 mx-auto text-blue-500 animate-spin" />
                     <p className="text-gray-600">
-                      {serverStarting ? 'Starting server...' : 'Analyzing dental image...'}
+                      {serverStarting 
+                        ? `Starting server (Attempt ${currentAttempt}/3)...` 
+                        : 'Analyzing dental image...'}
                     </p>
                     {serverStarting && (
                       <p className="text-sm text-gray-500">
-                        This might take up to 50 seconds
+                        This might take up to 2-3 minutes
                       </p>
                     )}
                     <div className="w-64 mx-auto">
-                      <Progress value={progress} />
+                      <Progress 
+                        value={progress} 
+                        variant={currentAttempt > 1 ? 'warning' : 'primary'}
+                      />
                       <p className="text-sm text-gray-500 mt-2">{progress}%</p>
                     </div>
                   </div>
@@ -393,7 +331,8 @@ const DentalClassifier = () => {
                     </h3>
                     <button
                       onClick={resetClassifier}
-                      className="text-gray-500 hover:text-gray-700"
+                      className="text-gray-500 hover:text-gray-700 transition-colors"
+                      title="Reset"
                     >
                       <RefreshCcw className="w-5 h-5" />
                     </button>
@@ -419,18 +358,25 @@ const DentalClassifier = () => {
                             {(result.confidence * 100).toFixed(1)}%
                           </span>
                         </div>
-                        <Progress value={result.confidence * 100} />
+                        <Progress 
+                          value={result.confidence * 100}
+                          variant={
+                            result.confidence >= 0.9 ? 'success' :
+                            result.confidence >= 0.7 ? 'warning' : 'error'
+                          }
+                        />
                       </motion.div>
                     ))}
-                    
-                    {/* Additional Information */}
+
+                    {/* Disclaimer */}
                     <motion.div
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-100"
                     >
                       <p className="text-sm text-blue-700">
-                        Note: These results are for educational purposes only. Please consult a dental professional for accurate diagnosis.
+                        Note: These results are for educational purposes only. 
+                        Please consult a dental professional for accurate diagnosis.
                       </p>
                     </motion.div>
                   </div>
@@ -440,11 +386,13 @@ const DentalClassifier = () => {
           </div>
         </div>
 
-        {/* Footer Information */}
+        {/* Footer */}
         <div className="px-6 py-4 bg-gray-50 border-t border-gray-100">
           <p className="text-sm text-gray-600 text-center">
             {loading ? 
-              "Please wait while we analyze your image..." :
+              serverStarting ?
+                "Please wait while the server starts up..." :
+                "Please wait while we analyze your image..." :
               "Upload a clear image of the dental condition for best results"
             }
           </p>
@@ -501,21 +449,5 @@ class ErrorBoundary extends React.Component {
     return this.props.children;
   }
 }
-
-// Progress component type definition (if using TypeScript)
-/* 
-interface ProgressProps {
-  value: number;
-}
-*/
-
-// Alert component type definition (if using TypeScript)
-/*
-interface AlertProps {
-  variant: 'error' | 'warning' | 'success' | 'info';
-  children: React.ReactNode;
-  className?: string;
-}
-*/
 
 export default DentalClassifier;
