@@ -80,7 +80,7 @@ const DentalClassifier = () => {
     formData.append('image', selectedImage);
 
     try {
-      const response = await fetch('https://0fff-104-198-36-247.ngrok-free.app/api/classify', {
+      const response = await fetch('https://b101-104-198-36-247.ngrok-free.app/api/classify', {
         method: 'POST',
         body: formData
       });
