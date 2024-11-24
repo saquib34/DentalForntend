@@ -1,10 +1,8 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Upload, Activity, AlertCircle, Loader2, Camera, RefreshCcw } from 'lucide-react';
-import { useDropzone } from 'react-dropzone';
-import { axiosInstance, retryWithExponentialBackoff } from './api';
+import  Alert  from './Alert';
 import Progress from './Progress';
-import Alert from './Alert';
 
 const DentalClassifier = () => {
   const [selectedImage, setSelectedImage] = useState(null);
@@ -13,10 +11,7 @@ const DentalClassifier = () => {
   const [results, setResults] = useState(null);
   const [error, setError] = useState('');
   const [progress, setProgress] = useState(0);
-  const [serverStarting, setServerStarting] = useState(false);
-  const [currentAttempt, setCurrentAttempt] = useState(0);
 
-  // Cleanup preview URL when component unmounts
   useEffect(() => {
     return () => {
       if (previewUrl) {
@@ -32,8 +27,6 @@ const DentalClassifier = () => {
 
       img.onload = () => {
         URL.revokeObjectURL(img.src);
-
-        // Check dimensions
         if (img.width < 100 || img.height < 100) {
           reject('Image dimensions too small. Minimum 100x100 pixels required.');
           return;
@@ -42,13 +35,10 @@ const DentalClassifier = () => {
           reject('Image dimensions too large. Maximum 4096x4096 pixels allowed.');
           return;
         }
-
-        // Check file size (5MB)
         if (file.size > 5 * 1024 * 1024) {
           reject('Image size should be less than 5MB');
           return;
         }
-
         resolve(true);
       };
 
@@ -59,8 +49,8 @@ const DentalClassifier = () => {
     });
   };
 
-  const onDrop = useCallback(async (acceptedFiles) => {
-    const file = acceptedFiles[0];
+  const onDrop = useCallback(async (files) => {
+    const file = files[0];
     if (file) {
       try {
         await validateImage(file);
@@ -73,20 +63,11 @@ const DentalClassifier = () => {
         setError('');
         setResults(null);
         setProgress(0);
-        setCurrentAttempt(0);
       } catch (err) {
         setError(err);
       }
     }
   }, [previewUrl]);
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: {
-      'image/*': ['.jpeg', '.jpg', '.png']
-    },
-    multiple: false
-  });
 
   const classifyImage = async () => {
     if (!selectedImage) return;
@@ -94,88 +75,41 @@ const DentalClassifier = () => {
     setLoading(true);
     setError('');
     setProgress(0);
-    setServerStarting(false);
-    setCurrentAttempt(1);
 
-    let progressInterval;
-
-    const startProgress = () => {
-      if (progressInterval) clearInterval(progressInterval);
-      setProgress(0);
-      progressInterval = setInterval(() => {
-        setProgress(prev => {
-          const increment = currentAttempt === 1 ? 1 : 2;
-          return Math.min(prev + increment, 90);
-        });
-      }, 1000);
-    };
+    const formData = new FormData();
+    formData.append('image', selectedImage);
 
     try {
-      const reader = new FileReader();
-      await new Promise((resolve, reject) => {
-        reader.onloadend = async () => {
-          try {
-            startProgress();
-            setServerStarting(true);
-
-            const response = await retryWithExponentialBackoff(async () => {
-              setCurrentAttempt(prev => prev + 1);
-              return await axiosInstance.post('/api/classify', {
-                image: reader.result
-              });
-            });
-
-            if (progressInterval) clearInterval(progressInterval);
-            setProgress(100);
-            setResults(response.data.predictions);
-            setServerStarting(false);
-          } catch (err) {
-            if (progressInterval) {
-              clearInterval(progressInterval);
-            }
-            
-            let errorMessage = 'Failed to classify image. Please try again.';
-            
-            if (err?.response?.status === 503) {
-              errorMessage = 'Server is starting up. Please wait a moment and try again.';
-            } else if (err?.response?.status === 413) {
-              errorMessage = 'Image size is too large. Please use a smaller image.';
-            } else if (err?.code === 'ECONNABORTED') {
-              errorMessage = 'The server is taking longer than expected. Please try again.';
-            } else if (err?.code === 'ERR_NETWORK') {
-              errorMessage = 'Unable to connect to server. Please check your connection.';
-            } else if (err.message === 'Max retries reached') {
-              errorMessage = 'The server is not responding. Please try again later.';
-            }
-            
-            setError(errorMessage);
-            console.error('Classification error:', err);
-          } finally {
-            setLoading(false);
-            setServerStarting(false);
-            if (!error) setProgress(0);
-          }
-        };
-
-        reader.onerror = (error) => {
-          if (progressInterval) {
-            clearInterval(progressInterval);
-          }
-          setError('Failed to read image file');
-          setLoading(false);
-          reject(error);
-        };
-
-        reader.readAsDataURL(selectedImage);
+      const response = await fetch('https://dentalbackend-8hhh.onrender.com/api/classify', {
+        method: 'POST',
+        body: formData
       });
-    } catch (err) {
-      if (progressInterval) {
-        clearInterval(progressInterval);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
-      setError('Failed to process image');
+
+      const data = await response.json();
+      
+      // Transform the predictions into the format expected by the UI
+      const transformedResults = data.all_predictions.map(prediction => ({
+        class: prediction.class_name,
+        confidence: prediction.confidence
+      }));
+
+      setResults(transformedResults);
+      setProgress(100);
+    } catch (err) {
+      let errorMessage = 'Failed to classify image. Please try again.';
+      
+      if (err.message.includes('Failed to fetch')) {
+        errorMessage = 'Unable to connect to server. Please check if the server is running.';
+      }
+      
+      setError(errorMessage);
+      console.error('Classification error:', err);
+    } finally {
       setLoading(false);
-      setServerStarting(false);
-      setProgress(0);
     }
   };
 
@@ -188,8 +122,23 @@ const DentalClassifier = () => {
     setResults(null);
     setError('');
     setProgress(0);
-    setCurrentAttempt(0);
   }, [previewUrl]);
+
+  // Handle drag and drop
+  const handleDragOver = (e) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    const files = e.dataTransfer.files;
+    onDrop(files);
+  };
+
+  const handleFileInput = (e) => {
+    const files = e.target.files;
+    onDrop(files);
+  };
 
   return (
     <div className="max-w-6xl mx-auto px-4">
@@ -198,22 +147,28 @@ const DentalClassifier = () => {
           {/* Upload Section */}
           <div className="space-y-6">
             <motion.div
-              {...getRootProps()}
-              className={`border-2 border-dashed rounded-xl p-8 transition-all duration-300 cursor-pointer
-                ${isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-blue-400'}`}
+              onDragOver={handleDragOver}
+              onDrop={handleDrop}
+              className="border-2 border-dashed rounded-xl p-8 transition-all duration-300 cursor-pointer hover:border-blue-400"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
             >
-              <input {...getInputProps()} />
-              <div className="text-center">
+              <input
+                type="file"
+                accept="image/*"
+                onChange={handleFileInput}
+                className="hidden"
+                id="image-upload"
+              />
+              <label htmlFor="image-upload" className="text-center block cursor-pointer">
                 <Upload className="w-16 h-16 mx-auto text-blue-500 mb-4" />
                 <h3 className="text-lg font-semibold text-gray-700">
-                  {isDragActive ? 'Drop image here' : 'Upload Dental Image'}
+                  Upload Dental Image
                 </h3>
                 <p className="text-sm text-gray-500 mt-2">
                   Drag & drop or click to browse
                 </p>
-              </div>
+              </label>
             </motion.div>
 
             {previewUrl && (
@@ -239,9 +194,7 @@ const DentalClassifier = () => {
                   {loading ? (
                     <>
                       <Loader2 className="w-5 h-5 animate-spin" />
-                      <span>
-                        {serverStarting ? `Starting server (Attempt ${currentAttempt}/3)...` : 'Analyzing...'}
-                      </span>
+                      <span>Analyzing...</span>
                     </>
                   ) : (
                     <>
@@ -254,19 +207,9 @@ const DentalClassifier = () => {
             )}
 
             {error && (
-              <Alert 
-                variant="error" 
-                className="animate-fade-in"
-              >
-                <div className="flex items-center gap-2">
-                  <AlertCircle className="w-5 h-5" />
-                  <span>{error}</span>
-                </div>
-                {error.includes('Server is') && (
-                  <p className="text-sm mt-2 text-gray-600">
-                    This might take up to 2-3 minutes as we're using a free server that needs to wake up.
-                  </p>
-                )}
+              <Alert variant="destructive" className="animate-fade-in">
+                <AlertCircle className="h-4 w-4" />
+                <span>{error}</span>
               </Alert>
             )}
           </div>
@@ -297,21 +240,9 @@ const DentalClassifier = () => {
                 >
                   <div className="text-center space-y-4">
                     <Loader2 className="w-16 h-16 mx-auto text-blue-500 animate-spin" />
-                    <p className="text-gray-600">
-                      {serverStarting 
-                        ? `Starting server (Attempt ${currentAttempt}/3)...` 
-                        : 'Analyzing dental image...'}
-                    </p>
-                    {serverStarting && (
-                      <p className="text-sm text-gray-500">
-                        This might take up to 2-3 minutes
-                      </p>
-                    )}
+                    <p className="text-gray-600">Analyzing dental image...</p>
                     <div className="w-64 mx-auto">
-                      <Progress 
-                        value={progress} 
-                        variant={currentAttempt > 1 ? 'warning' : 'primary'}
-                      />
+                      <Progress value={progress} />
                       <p className="text-sm text-gray-500 mt-2">{progress}%</p>
                     </div>
                   </div>
@@ -390,64 +321,14 @@ const DentalClassifier = () => {
         <div className="px-6 py-4 bg-gray-50 border-t border-gray-100">
           <p className="text-sm text-gray-600 text-center">
             {loading ? 
-              serverStarting ?
-                "Please wait while the server starts up..." :
-                "Please wait while we analyze your image..." :
+              "Please wait while we analyze your image..." :
               "Upload a clear image of the dental condition for best results"
             }
           </p>
         </div>
       </div>
-
-      {/* Error Boundary */}
-      <ErrorBoundary>
-        {error && error.includes('server') && (
-          <div className="mt-4">
-            <Alert variant="warning">
-              <p className="text-sm">
-                If the server is not responding, you can try:
-                <ul className="list-disc ml-4 mt-2">
-                  <li>Waiting a few moments and trying again</li>
-                  <li>Checking your internet connection</li>
-                  <li>Refreshing the page</li>
-                </ul>
-              </p>
-            </Alert>
-          </div>
-        )}
-      </ErrorBoundary>
     </div>
   );
 };
-
-// Error Boundary Component
-class ErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props);
-    this.state = { hasError: false };
-  }
-
-  static getDerivedStateFromError(error) {
-    return { hasError: true };
-  }
-
-  componentDidCatch(error, errorInfo) {
-    console.error('Error caught by boundary:', error, errorInfo);
-  }
-
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="mt-4">
-          <Alert variant="error">
-            <p>Something went wrong. Please try refreshing the page.</p>
-          </Alert>
-        </div>
-      );
-    }
-
-    return this.props.children;
-  }
-}
 
 export default DentalClassifier;
